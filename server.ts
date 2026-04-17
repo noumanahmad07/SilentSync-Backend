@@ -238,8 +238,10 @@ app.post("/api/upload/:deviceId", async (req, res) => {
         } else if (type === "messages" && item.date && item.address) {
           docId = `${item.date}_${item.address.replace(/[^0-9]/g, "")}`;
         } else if (type === "contacts" && item.displayName) {
-          const phone = item.phoneNumbers?.[0] || "";
-          docId = `${item.displayName.replace(/\s/g, "_")}_${phone.replace(/[^0-9]/g, "")}`;
+          const phone =
+            item.phoneNumbers?.[0]?.number || item.phoneNumbers?.[0] || "";
+          const phoneNumber = typeof phone === "string" ? phone : String(phone);
+          docId = `${item.displayName.replace(/\s/g, "_")}_${phoneNumber.replace(/[^0-9]/g, "")}`;
         } else if (type === "apps" && item.packageName) {
           docId = item.packageName.replace(/\./g, "_");
         } else if (type === "locations" && item.timestamp) {
@@ -585,12 +587,10 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
     res.json({ success: true, url: publicUrl, fileName: localFileName });
   } catch (error) {
     console.error("[Photo] Upload error:", error);
-    res
-      .status(500)
-      .json({
-        error: "Failed to save photo",
-        details: error instanceof Error ? error.message : String(error),
-      });
+    res.status(500).json({
+      error: "Failed to save photo",
+      details: error instanceof Error ? error.message : String(error),
+    });
   }
 });
 
