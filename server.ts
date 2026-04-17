@@ -527,7 +527,12 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
   const { deviceId } = req.params;
   const { fileName, base64 } = req.body;
 
+  console.log(
+    `[Photo] Upload request: deviceId=${deviceId}, fileName=${fileName}`,
+  );
+
   if (!deviceId || !fileName || !base64) {
+    console.error("[Photo] Missing required fields");
     return res
       .status(400)
       .json({ error: "Missing required fields: deviceId, fileName, base64" });
@@ -535,6 +540,9 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
 
   // Cloudflare Worker mode: return error (use R2 for production)
   if (isWorker) {
+    console.error(
+      "[Photo] Cloudflare Worker mode not supported for local storage",
+    );
     return res.status(501).json({
       error:
         "Photo storage requires Cloudflare R2 or external storage on this platform. " +
@@ -545,6 +553,7 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
   try {
     const uploadsDir = path.join(__dirname, "public", "uploads");
     if (!fs.existsSync(uploadsDir)) {
+      console.log(`[Photo] Creating uploads directory: ${uploadsDir}`);
       fs.mkdirSync(uploadsDir, { recursive: true });
     }
 
@@ -552,6 +561,7 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
     const localFileName = fileName.replace(/[^a-zA-Z0-9.]/g, "_");
     const filePath = path.join(uploadsDir, localFileName);
 
+    console.log(`[Photo] Writing file: ${filePath}`);
     fs.writeFileSync(filePath, buffer);
 
     const publicUrl = `/uploads/${localFileName}`;
@@ -574,8 +584,13 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
     console.log(`[Photo] Uploaded for ${deviceId}: ${localFileName}`);
     res.json({ success: true, url: publicUrl, fileName: localFileName });
   } catch (error) {
-    console.error("Photo upload error:", error);
-    res.status(500).json({ error: "Failed to save photo" });
+    console.error("[Photo] Upload error:", error);
+    res
+      .status(500)
+      .json({
+        error: "Failed to save photo",
+        details: error instanceof Error ? error.message : String(error),
+      });
   }
 });
 
