@@ -234,9 +234,17 @@ app.post("/api/upload/:deviceId", async (req, res) => {
 
         // Generate unique document IDs for deduplication
         if (type === "call_logs" && item.timestamp && item.phoneNumber) {
-          docId = `${item.timestamp}_${item.phoneNumber.replace(/[^0-9]/g, "")}`;
+          const phoneNumber =
+            typeof item.phoneNumber === "string"
+              ? item.phoneNumber
+              : String(item.phoneNumber);
+          docId = `${item.timestamp}_${phoneNumber.replace(/[^0-9]/g, "")}`;
         } else if (type === "messages" && item.date && item.address) {
-          docId = `${item.date}_${item.address.replace(/[^0-9]/g, "")}`;
+          const address =
+            typeof item.address === "string"
+              ? item.address
+              : String(item.address);
+          docId = `${item.date}_${address.replace(/[^0-9]/g, "")}`;
         } else if (type === "contacts" && item.displayName) {
           const phone =
             item.phoneNumbers?.[0]?.number || item.phoneNumbers?.[0] || "";
