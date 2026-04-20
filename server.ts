@@ -366,10 +366,10 @@ app.post("/api/command/:deviceId", async (req, res) => {
     // Handle camera_capture command
     if (type === "camera_capture") {
       // Use WebSocket URL based on environment
-      const protocol = isWorker ? "wss" : "ws";
+      const protocol = req.secure || isWorker ? "wss" : "ws";
       const host = isWorker
         ? "silentsync-backend.onrender.com"
-        : `${req.headers.host}`;
+        : req.headers.host;
       const streamUrl = `${protocol}://${host}/camera-stream?deviceId=${deviceId}`;
       commandData.payload = { streamUrl };
       console.log(`[Command] Camera capture payload:`, commandData.payload);
@@ -673,8 +673,9 @@ const screenStreams = new Map<string, Set<WebSocket>>();
 // WebSocket Server for Camera Streaming
 const cameraStreams = new Map<string, Set<WebSocket>>();
 
-// Start local server if not on Worker
-if (!isWorker) {
+// Start local server if not on Cloudflare Worker
+// Note: Render is NOT a Cloudflare Worker, so WebSocket server should run there
+if (!isWorker || !!(globalThis as any).caches) {
   const PORT = parseInt(process.env.PORT || "3000", 10);
 
   const server = app.listen(PORT, "0.0.0.0", () => {
