@@ -675,7 +675,7 @@ const cameraStreams = new Map<string, Set<WebSocket>>();
 
 // Start local server if not on Cloudflare Worker
 // Note: Render is NOT a Cloudflare Worker, so WebSocket server should run there
-if (!isCloudflareWorker || !!(globalThis as any).caches) {
+if (!isCloudflareWorker) {
   const PORT = parseInt(process.env.PORT || "3000", 10);
 
   const server = app.listen(PORT, "0.0.0.0", () => {
