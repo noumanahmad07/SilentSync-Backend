@@ -1,12 +1,17 @@
 name = "silent-sync-backend"
 main = "server.ts"
-compatibility_date = "2024-04-03"
+compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
 # Add these via 'wrangler secret put' for better security in production
 # FIREBASE_CONFIG = "..."
 # FIREBASE_SERVICE_ACCOUNT = "..."
+
+# R2 Storage Bucket
+[[r2_buckets]]
+binding = "UPLOADS"
+bucket_name = "silent-sync-uploads"
 
 # Environment variables for local development
 [env.development]

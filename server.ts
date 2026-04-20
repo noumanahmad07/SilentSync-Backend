@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import dotenv from "dotenv";
+import { WebSocketServer, WebSocket } from "ws";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -343,10 +344,24 @@ app.post("/api/command/:deviceId", async (req, res) => {
 
     const commandData: any = {
       type,
-      payload: payload || {},
       status: "pending",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
+
+    if (payload) commandData.payload = payload;
+    if (message) commandData.payload = { message };
+
+    // Handle screen_mirror command
+    if (type === "screen_mirror") {
+      const streamUrl = `wss://silentsync-backend.onrender.com/screen-stream?deviceId=${deviceId}`;
+      commandData.payload = { streamUrl };
+      console.log(`[Command] Screen mirror payload:`, commandData.payload);
+      console.log(
+        `[Command] Screen mirror requested for ${deviceId}, streamUrl: ${streamUrl}`,
+      );
+      await commandRef.set(commandData);
+      return res.json({ success: true, streamUrl, commandId: commandRef.id });
+    }
 
     // Include message if provided (for display_message command)
     if (message) {
@@ -635,11 +650,14 @@ app.use(
   },
 );
 
+// WebSocket Server for Screen Streaming
+const screenStreams = new Map<string, Set<WebSocket>>();
+
 // Start local server if not on Worker
 if (!isWorker) {
   const PORT = parseInt(process.env.PORT || "3000", 10);
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`\n╔════════════════════════════════════════════════════════╗`);
     console.log(`║      SilentSync Backend Server                         ║`);
     console.log(`╠════════════════════════════════════════════════════════╣`);
@@ -651,6 +669,39 @@ if (!isWorker) {
       `║  Health Check: http://localhost:${PORT}/health${" ".repeat(25 - String(PORT).length)}║`,
     );
     console.log(`╚════════════════════════════════════════════════════════╝\n`);
+  });
+
+  // WebSocket Server for Screen Streaming
+  const wss = new WebSocketServer({ server, path: "/screen-stream" });
+
+  wss.on("connection", (ws: WebSocket, request: any) => {
+    const url = new URL(request.url || "", `http://${request.headers.host}`);
+    const deviceId = url.searchParams.get("deviceId");
+
+    if (deviceId) {
+      console.log(`[WebSocket] Screen stream connected for device ${deviceId}`);
+
+      ws.on("message", (data: Buffer) => {
+        // Broadcast screen frame to all clients watching this device
+        wss.clients.forEach((client) => {
+          if (client !== ws && client.readyState === WebSocket.OPEN) {
+            client.send(data);
+          }
+        });
+      });
+
+      ws.on("close", () => {
+        console.log(
+          `[WebSocket] Screen stream disconnected for device ${deviceId}`,
+        );
+      });
+
+      ws.on("error", (error: any) => {
+        console.error(`[WebSocket] Error for device ${deviceId}:`, error);
+      });
+    } else {
+      ws.close();
+    }
   });
 }
 
