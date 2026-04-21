@@ -707,6 +707,78 @@ app.get("/api/live-audio/:deviceId", async (req, res) => {
   }
 });
 
+// WebRTC Signaling for gapless audio streaming
+app.post("/api/webrtc/offer", async (req, res) => {
+  const { deviceId, offer } = req.body;
+  if (!deviceId || !offer) {
+    return res.status(400).json({ error: "deviceId and offer are required" });
+  }
+  try {
+    await db.collection("webrtcSessions").doc(deviceId).set(
+      {
+        offer,
+        offerCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error("WebRTC offer error:", error);
+    res.status(500).json({ error: "Failed to store offer" });
+  }
+});
+
+app.get("/api/webrtc/offer/:deviceId", async (req, res) => {
+  const { deviceId } = req.params;
+  if (!deviceId) return res.status(400).json({ error: "deviceId is required" });
+  try {
+    const doc = await db.collection("webrtcSessions").doc(deviceId).get();
+    if (!doc.exists) return res.json({ exists: false });
+    const data = doc.data();
+    if (!data?.offer) return res.json({ exists: false });
+    res.json({ exists: true, offer: data.offer });
+  } catch (error) {
+    console.error("WebRTC offer fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch offer" });
+  }
+});
+
+app.post("/api/webrtc/answer/:deviceId", async (req, res) => {
+  const { deviceId } = req.params;
+  const { answer } = req.body;
+  if (!deviceId || !answer) {
+    return res.status(400).json({ error: "deviceId and answer are required" });
+  }
+  try {
+    await db.collection("webrtcSessions").doc(deviceId).set(
+      {
+        answer,
+        answerCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error("WebRTC answer error:", error);
+    res.status(500).json({ error: "Failed to store answer" });
+  }
+});
+
+app.get("/api/webrtc/answer/:deviceId", async (req, res) => {
+  const { deviceId } = req.params;
+  if (!deviceId) return res.status(400).json({ error: "deviceId is required" });
+  try {
+    const doc = await db.collection("webrtcSessions").doc(deviceId).get();
+    if (!doc.exists) return res.json({ exists: false });
+    const data = doc.data();
+    if (!data?.answer) return res.json({ exists: false });
+    res.json({ exists: true, answer: data.answer });
+  } catch (error) {
+    console.error("WebRTC answer fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch answer" });
+  }
+});
+
 // Handle Photo Uploads
 app.post("/api/upload-photo/:deviceId", async (req, res) => {
   const { deviceId } = req.params;
