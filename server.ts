@@ -576,6 +576,80 @@ app.get("/api/audio/:deviceId", async (req, res) => {
   }
 });
 
+// Live Audio (HTTP fallback): store and serve latest short audio segment
+app.post("/api/live-audio/:deviceId", async (req, res) => {
+  const { deviceId } = req.params;
+  const { base64 } = req.body;
+
+  if (!deviceId || !base64) {
+    return res.status(400).json({ error: "deviceId and base64 are required" });
+  }
+
+  if (isCloudflareWorker) {
+    return res
+      .status(501)
+      .json({ error: "Not supported on Cloudflare Worker" });
+  }
+
+  try {
+    const uploadsDir = path.join(__dirname, "public", "uploads");
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    const buffer = Buffer.from(base64, "base64");
+    const localFileName = `audio_stream_latest_${deviceId}.m4a`;
+    const filePath = path.join(uploadsDir, localFileName);
+    fs.writeFileSync(filePath, buffer);
+
+    const publicUrl = `/uploads/${localFileName}`;
+
+    // Touch online status
+    await db.collection("devices").doc(deviceId).set(
+      {
+        lastConnectionAt: admin.firestore.FieldValue.serverTimestamp(),
+        status: "active",
+        isOnline: true,
+      },
+      { merge: true },
+    );
+
+    res.json({
+      success: true,
+      url: publicUrl,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Live audio upload error:", error);
+    res.status(500).json({ error: "Failed to upload live audio" });
+  }
+});
+
+app.get("/api/live-audio/:deviceId", async (req, res) => {
+  const { deviceId } = req.params;
+  if (!deviceId) return res.status(400).json({ error: "deviceId is required" });
+  if (isCloudflareWorker) return res.json({ exists: false });
+
+  try {
+    const uploadsDir = path.join(__dirname, "public", "uploads");
+    const localFileName = `audio_stream_latest_${deviceId}.m4a`;
+    const filePath = path.join(uploadsDir, localFileName);
+    if (!fs.existsSync(filePath)) {
+      return res.json({ exists: false });
+    }
+    const stat = fs.statSync(filePath);
+    return res.json({
+      exists: true,
+      url: `/uploads/${localFileName}`,
+      updatedAt: stat.mtime.toISOString(),
+      size: stat.size,
+    });
+  } catch (error) {
+    console.error("Live audio fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch live audio" });
+  }
+});
+
 // Handle Photo Uploads
 app.post("/api/upload-photo/:deviceId", async (req, res) => {
   const { deviceId } = req.params;
