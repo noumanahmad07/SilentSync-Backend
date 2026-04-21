@@ -805,6 +805,16 @@ app.post("/api/online-status/:deviceId", async (req, res) => {
   }
 });
 
+// Debug endpoint to verify runtime + WS support (safe, read-only)
+app.get("/api/debug/ws", (req, res) => {
+  res.json({
+    status: "ok",
+    isCloudflareWorker,
+    wsPaths: ["/screen-stream", "/camera-stream", "/audio-stream"],
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ error: "Endpoint not found", path: req.path });
