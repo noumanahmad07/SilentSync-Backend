@@ -175,7 +175,9 @@ app.post("/api/register-device", async (req, res) => {
         deviceName: deviceName || `Device ${deviceId.substr(0, 4)}`,
         registeredAt: admin.firestore.FieldValue.serverTimestamp(),
         lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastConnectionAt: admin.firestore.FieldValue.serverTimestamp(),
         status: "active",
+        isOnline: true,
         isPublic: true,
         ownerUid: ownerUid || null,
       },
@@ -208,11 +210,13 @@ app.post("/api/upload/:deviceId", async (req, res) => {
   try {
     const deviceRef = db.collection("devices").doc(deviceId);
 
-    // Update last sync time
+    // Update last sync time and online status
     await deviceRef.set(
       {
         lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastConnectionAt: admin.firestore.FieldValue.serverTimestamp(),
         status: "active",
+        isOnline: true,
       },
       { merge: true },
     );
@@ -314,7 +318,9 @@ app.post("/api/location/:deviceId", async (req, res) => {
     await deviceRef.set(
       {
         lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastConnectionAt: admin.firestore.FieldValue.serverTimestamp(),
         status: "active",
+        isOnline: true,
       },
       { merge: true },
     );
@@ -618,20 +624,28 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
       ? "camera_stream_latest"
       : localFileName.replace(/\./g, "_");
 
-    await db
-      .collection("devices")
-      .doc(deviceId)
-      .collection("photos")
-      .doc(photoId)
-      .set(
-        {
-          fileName: localFileName,
-          url: publicUrl,
-          syncedAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
+    const deviceRef = db.collection("devices").doc(deviceId);
+
+    await deviceRef.collection("photos").doc(photoId).set(
+      {
+        fileName: localFileName,
+        url: publicUrl,
+        syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    // Also update device online status
+    await deviceRef.set(
+      {
+        lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastConnectionAt: admin.firestore.FieldValue.serverTimestamp(),
+        status: "active",
+        isOnline: true,
+      },
+      { merge: true },
+    );
 
     console.log(`[Photo] Uploaded for ${deviceId}: ${localFileName}`);
     res.json({ success: true, url: publicUrl, fileName: localFileName });
@@ -656,6 +670,70 @@ if (!isCloudflareWorker) {
   app.use("/uploads", cors(), express.static(uploadsDir));
   console.log(`[Static] Serving uploads from ${uploadsDir}`);
 }
+
+// Heartbeat Endpoint (Device calls this to stay marked as active)
+app.post("/api/heartbeat/:deviceId", async (req, res) => {
+  const { deviceId } = req.params;
+
+  if (!deviceId) {
+    return res.status(400).json({ error: "deviceId is required" });
+  }
+
+  try {
+    const deviceRef = db.collection("devices").doc(deviceId);
+    await deviceRef.set(
+      {
+        lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastConnectionAt: admin.firestore.FieldValue.serverTimestamp(),
+        status: "active",
+        isOnline: true,
+      },
+      { merge: true },
+    );
+
+    res.json({ success: true, timestamp: new Date().toISOString() });
+  } catch (error) {
+    console.error("Heartbeat error:", error);
+    res.status(500).json({ error: "Failed to update heartbeat" });
+  }
+});
+
+// Online Status Endpoint (Device reports internet connectivity status)
+app.post("/api/online-status/:deviceId", async (req, res) => {
+  const { deviceId } = req.params;
+  const { isOnline } = req.body;
+
+  if (!deviceId) {
+    return res.status(400).json({ error: "deviceId is required" });
+  }
+
+  if (typeof isOnline !== "boolean") {
+    return res.status(400).json({ error: "isOnline (boolean) is required" });
+  }
+
+  try {
+    const deviceRef = db.collection("devices").doc(deviceId);
+    await deviceRef.set(
+      {
+        isOnline: isOnline,
+        lastConnectionAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastSyncAt: isOnline
+          ? admin.firestore.FieldValue.serverTimestamp()
+          : undefined,
+        status: isOnline ? "active" : "offline",
+      },
+      { merge: true },
+    );
+
+    console.log(
+      `[Online Status] Device ${deviceId} is now ${isOnline ? "ONLINE" : "OFFLINE"}`,
+    );
+    res.json({ success: true, isOnline, timestamp: new Date().toISOString() });
+  } catch (error) {
+    console.error("Online status update error:", error);
+    res.status(500).json({ error: "Failed to update online status" });
+  }
+});
 
 // 404 handler
 app.use((req, res) => {
@@ -770,6 +848,49 @@ if (!isCloudflareWorker) {
       ws.close();
     }
   });
+}
+
+// Periodic task to mark devices offline if no data received for 10 minutes
+// Only run on the main Render instance (not on Cloudflare Workers)
+if (!isCloudflareWorker) {
+  const OFFLINE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+
+  setInterval(async () => {
+    try {
+      const cutoffTime = admin.firestore.Timestamp.fromMillis(
+        Date.now() - OFFLINE_THRESHOLD_MS,
+      );
+
+      // Find devices that haven't sent data in the last 10 minutes
+      const devicesSnapshot = await db
+        .collection("devices")
+        .where("isOnline", "==", true)
+        .where("lastConnectionAt", "<", cutoffTime)
+        .get();
+
+      if (!devicesSnapshot.empty) {
+        const batch = db.batch();
+        let offlineCount = 0;
+
+        devicesSnapshot.docs.forEach((deviceDoc) => {
+          batch.update(deviceDoc.ref, {
+            isOnline: false,
+            status: "offline",
+          });
+          offlineCount++;
+        });
+
+        await batch.commit();
+        console.log(
+          `[Offline Check] Marked ${offlineCount} devices as offline`,
+        );
+      }
+    } catch (error) {
+      console.error("[Offline Check] Error:", error);
+    }
+  }, 60000); // Check every minute
+
+  console.log("[Offline Check] Scheduled to run every minute");
 }
 
 // Export for Cloudflare Workers
