@@ -579,7 +579,7 @@ app.get("/api/audio/:deviceId", async (req, res) => {
 // Live Audio (HTTP fallback): store and serve latest short audio segment
 app.post("/api/live-audio/:deviceId", async (req, res) => {
   const { deviceId } = req.params;
-  const { base64 } = req.body;
+  const { base64, segmentId } = req.body;
 
   if (!deviceId || !base64) {
     return res.status(400).json({ error: "deviceId and base64 are required" });
@@ -598,11 +598,36 @@ app.post("/api/live-audio/:deviceId", async (req, res) => {
     }
 
     const buffer = Buffer.from(base64, "base64");
-    const localFileName = `audio_stream_latest_${deviceId}.m4a`;
-    const filePath = path.join(uploadsDir, localFileName);
-    fs.writeFileSync(filePath, buffer);
+    const segId = String(segmentId || Date.now());
+    const segmentFileName = `audio_stream_${deviceId}_${segId}.m4a`;
+    const segmentPath = path.join(uploadsDir, segmentFileName);
+    fs.writeFileSync(segmentPath, buffer);
 
-    const publicUrl = `/uploads/${localFileName}`;
+    // Backward compatibility: also write/overwrite latest
+    const latestFileName = `audio_stream_latest_${deviceId}.m4a`;
+    const latestPath = path.join(uploadsDir, latestFileName);
+    fs.writeFileSync(latestPath, buffer);
+
+    // Keep last 30 segments per device to allow continuous playback
+    const segmentPrefix = `audio_stream_${deviceId}_`;
+    const segmentFiles = fs
+      .readdirSync(uploadsDir)
+      .filter((f) => f.startsWith(segmentPrefix) && f.endsWith(".m4a"))
+      .map((f) => ({
+        file: f,
+        mtimeMs: fs.statSync(path.join(uploadsDir, f)).mtimeMs,
+      }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    for (const old of segmentFiles.slice(30)) {
+      try {
+        fs.unlinkSync(path.join(uploadsDir, old.file));
+      } catch {
+        // ignore
+      }
+    }
+
+    const publicUrl = `/uploads/${segmentFileName}`;
 
     // Touch online status
     await db.collection("devices").doc(deviceId).set(
@@ -617,6 +642,7 @@ app.post("/api/live-audio/:deviceId", async (req, res) => {
     res.json({
       success: true,
       url: publicUrl,
+      segmentId: segId,
       updatedAt: new Date().toISOString(),
     });
   } catch (error) {
@@ -627,22 +653,53 @@ app.post("/api/live-audio/:deviceId", async (req, res) => {
 
 app.get("/api/live-audio/:deviceId", async (req, res) => {
   const { deviceId } = req.params;
+  const after = typeof req.query.after === "string" ? req.query.after : null;
   if (!deviceId) return res.status(400).json({ error: "deviceId is required" });
   if (isCloudflareWorker) return res.json({ exists: false });
 
   try {
     const uploadsDir = path.join(__dirname, "public", "uploads");
-    const localFileName = `audio_stream_latest_${deviceId}.m4a`;
-    const filePath = path.join(uploadsDir, localFileName);
-    if (!fs.existsSync(filePath)) {
-      return res.json({ exists: false });
+    const segmentPrefix = `audio_stream_${deviceId}_`;
+    if (!fs.existsSync(uploadsDir)) return res.json({ exists: false });
+
+    const allSegments = fs
+      .readdirSync(uploadsDir)
+      .filter((f) => f.startsWith(segmentPrefix) && f.endsWith(".m4a"))
+      .map((file) => {
+        const segId = file.replace(segmentPrefix, "").replace(/\.m4a$/, "");
+        const stat = fs.statSync(path.join(uploadsDir, file));
+        return {
+          segmentId: segId,
+          url: `/uploads/${file}`,
+          updatedAt: stat.mtime.toISOString(),
+          size: stat.size,
+        };
+      })
+      .sort((a, b) => Number(a.segmentId) - Number(b.segmentId));
+
+    const segments = after
+      ? allSegments.filter((s) => Number(s.segmentId) > Number(after))
+      : allSegments.slice(-5);
+
+    if (segments.length === 0) {
+      // Fall back to latest file existence check
+      const latestFileName = `audio_stream_latest_${deviceId}.m4a`;
+      const latestPath = path.join(uploadsDir, latestFileName);
+      if (!fs.existsSync(latestPath)) return res.json({ exists: false });
+      const stat = fs.statSync(latestPath);
+      return res.json({
+        exists: true,
+        url: `/uploads/${latestFileName}`,
+        updatedAt: stat.mtime.toISOString(),
+        size: stat.size,
+        segments: [],
+      });
     }
-    const stat = fs.statSync(filePath);
+
     return res.json({
       exists: true,
-      url: `/uploads/${localFileName}`,
-      updatedAt: stat.mtime.toISOString(),
-      size: stat.size,
+      segments,
+      latestSegmentId: segments[segments.length - 1]?.segmentId || null,
     });
   } catch (error) {
     console.error("Live audio fetch error:", error);
