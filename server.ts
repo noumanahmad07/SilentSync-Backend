@@ -658,6 +658,76 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
   }
 });
 
+// Handle Audio Uploads
+app.post("/api/upload-audio/:deviceId", async (req, res) => {
+  const { deviceId } = req.params;
+
+  console.log(`[Audio] Upload request: deviceId=${deviceId}`);
+
+  if (!deviceId) {
+    return res.status(400).json({ error: "deviceId is required" });
+  }
+
+  try {
+    // For multipart/form-data, we need to handle it differently
+    // In a production app, you'd use multer or similar
+    // For now, we'll handle base64 audio data
+    const { fileName, base64, duration } = req.body;
+
+    if (!base64) {
+      return res.status(400).json({ error: "base64 audio data is required" });
+    }
+
+    const buffer = Buffer.from(base64, "base64");
+    const localFileName = fileName || `audio_${deviceId}_${Date.now()}.webm`;
+    const filePath = path.join(__dirname, "public", "uploads", localFileName);
+
+    console.log(`[Audio] Writing file: ${filePath}`);
+    fs.writeFileSync(filePath, buffer);
+
+    const publicUrl = `/uploads/${localFileName}`;
+
+    // Store in Firestore
+    const audioId = localFileName.replace(/\./g, "_");
+
+    await db
+      .collection("devices")
+      .doc(deviceId)
+      .collection("audio")
+      .doc(audioId)
+      .set(
+        {
+          fileName: localFileName,
+          url: publicUrl,
+          duration: duration || 0,
+          syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+
+    // Update device online status
+    await db.collection("devices").doc(deviceId).set(
+      {
+        lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastConnectionAt: admin.firestore.FieldValue.serverTimestamp(),
+        status: "active",
+        isOnline: true,
+      },
+      { merge: true },
+    );
+
+    console.log(`[Audio] Uploaded for ${deviceId}: ${localFileName}`);
+    res.json({ success: true, url: publicUrl, fileName: localFileName });
+  } catch (error) {
+    console.error("[Audio] Upload error:", error);
+    res.status(500).json({
+      error: "Failed to save audio",
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 // Serve static photos (Local only)
 if (!isCloudflareWorker) {
   const uploadsDir = path.join(__dirname, "public", "uploads");
@@ -843,6 +913,39 @@ if (!isCloudflareWorker) {
           `[WebSocket] Camera error for device ${deviceId}:`,
           error,
         );
+      });
+    } else {
+      ws.close();
+    }
+  });
+
+  // WebSocket Server for Audio Streaming
+  const audioWss = new WebSocketServer({ server, path: "/audio-stream" });
+
+  audioWss.on("connection", (ws: WebSocket, request: any) => {
+    const url = new URL(request.url || "", `http://${request.headers.host}`);
+    const deviceId = url.searchParams.get("deviceId");
+
+    if (deviceId) {
+      console.log(`[WebSocket] Audio stream connected for device ${deviceId}`);
+
+      ws.on("message", (data: Buffer) => {
+        // Broadcast audio frame to all clients watching this device
+        audioWss.clients.forEach((client: WebSocket) => {
+          if (client !== ws && client.readyState === WebSocket.OPEN) {
+            client.send(data);
+          }
+        });
+      });
+
+      ws.on("close", () => {
+        console.log(
+          `[WebSocket] Audio stream disconnected for device ${deviceId}`,
+        );
+      });
+
+      ws.on("error", (error: any) => {
+        console.error(`[WebSocket] Audio error for device ${deviceId}:`, error);
       });
     } else {
       ws.close();
