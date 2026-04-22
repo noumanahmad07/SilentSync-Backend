@@ -690,6 +690,93 @@ app.get("/api/check-unique-id/:uniqueId", async (req, res) => {
   }
 });
 
+// Check if user already has an APK
+app.get("/api/user-apk/:userId", async (req, res) => {
+  const { userId } = req.params;
+  if (!userId) {
+    return res.status(400).json({ error: "userId is required" });
+  }
+
+  try {
+    console.log(`[User APK Check] Checking APK for user: ${userId}`);
+
+    // Check if user has an APK registration
+    const userApkSnapshot = await db
+      .collection("userApkRegistrations")
+      .where("userId", "==", userId)
+      .get();
+
+    if (!userApkSnapshot.empty) {
+      const userApk = userApkSnapshot.docs[0].data();
+      console.log(`[User APK Check] User ${userId} has APK: ${userApk.apkUrl}`);
+      res.json({
+        hasApk: true,
+        apkUrl: userApk.apkUrl,
+        uniqueId: userApk.uniqueId,
+        createdAt: userApk.createdAt,
+      });
+    } else {
+      console.log(`[User APK Check] User ${userId} has no APK`);
+      res.json({ hasApk: false });
+    }
+  } catch (error) {
+    console.error("User APK check error:", error);
+    res.status(500).json({ error: "Failed to check user APK" });
+  }
+});
+
+// Register APK for specific user (one-ID-per-user system)
+app.post("/api/register-user-apk", async (req, res) => {
+  const { userId, uniqueId, apkUrl } = req.body;
+  if (!userId || !uniqueId || !apkUrl) {
+    return res
+      .status(400)
+      .json({ error: "userId, uniqueId, and apkUrl are required" });
+  }
+
+  try {
+    console.log(
+      `[User APK Registration] Registering APK for user: ${userId}, ID: ${uniqueId}`,
+    );
+
+    // First check if user already has an APK
+    const existingApkSnapshot = await db
+      .collection("userApkRegistrations")
+      .where("userId", "==", userId)
+      .get();
+
+    if (!existingApkSnapshot.empty) {
+      return res.status(400).json({
+        error:
+          "User already has an APK registered. Only one APK per user is allowed.",
+      });
+    }
+
+    // Register the APK for this user
+    await db.collection("userApkRegistrations").add({
+      userId,
+      uniqueId,
+      apkUrl,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      status: "active",
+    });
+
+    console.log(
+      `[User APK Registration] Successfully registered APK for user ${userId}`,
+    );
+    res.json({
+      success: true,
+      message: "APK registered successfully for user",
+      userId,
+      uniqueId,
+      apkUrl,
+    });
+  } catch (error) {
+    console.error("User APK registration error:", error);
+    res.status(500).json({ error: "Failed to register user APK" });
+  }
+});
+
 // Live Audio (HTTP fallback): store and serve latest short audio segment
 app.post("/api/live-audio/:deviceId", async (req, res) => {
   const { deviceId } = req.params;
