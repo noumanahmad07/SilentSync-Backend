@@ -727,16 +727,22 @@ app.get("/api/check-unique-id/:uniqueId", async (req, res) => {
           : "Device registration";
       console.log(`[Unique ID Check] Conflict source: ${conflictSource}`);
 
+      const resolvedOwnerUid = userApkWithSameId
+        ? userApkByUniqueIdSnapshot.docs[0].data()?.userId || null
+        : null;
+
       res.json({
         available: false,
+        exists: true,
         message: `Unique ID is already taken. It's already used in ${conflictSource}.`,
         conflictSource,
+        ownerUid: resolvedOwnerUid,
       });
     } else {
       console.log(
         `[Unique ID Check] ID ${uniqueId} is available for APK registration`,
       );
-      res.json({ available: true, message: "Unique ID is available" });
+      res.json({ available: true, exists: false, message: "Unique ID is available" });
     }
   } catch (error) {
     console.error("Check unique ID error:", error);
