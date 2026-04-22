@@ -164,11 +164,34 @@ app.get("/health", (req, res) => {
 
 // Register Device
 app.post("/api/register-device", async (req, res) => {
-  const { deviceId, deviceName, ownerUid } = req.body;
+  const { deviceId, deviceName, ownerUid, uniqueId, userId } = req.body;
   if (!deviceId) return res.status(400).json({ error: "deviceId is required" });
-  if (!ownerUid) return res.status(400).json({ error: "ownerUid is required" });
 
   try {
+    // If a uniqueId is provided (referral code), link the device to the dashboard
+    // user who created/owns that uniqueId.
+    let resolvedOwnerUid = ownerUid;
+    if (uniqueId) {
+      const ownerSnap = await db
+        .collection("userApkRegistrations")
+        .where("uniqueId", "==", uniqueId)
+        .limit(1)
+        .get();
+
+      if (!ownerSnap.empty) {
+        const owner = ownerSnap.docs[0].data();
+        if (owner?.userId) {
+          resolvedOwnerUid = owner.userId;
+        }
+      }
+    }
+
+    if (!resolvedOwnerUid) {
+      return res
+        .status(400)
+        .json({ error: "ownerUid is required (or provide uniqueId)" });
+    }
+
     const deviceRef = db.collection("devices").doc(deviceId);
     await deviceRef.set(
       {
@@ -180,7 +203,9 @@ app.post("/api/register-device", async (req, res) => {
         status: "active",
         isOnline: true,
         isPublic: false, // Devices are private by default
-        ownerUid: ownerUid,
+        ownerUid: resolvedOwnerUid,
+        ...(uniqueId ? { uniqueId } : {}),
+        ...(userId ? { userId } : {}),
       },
       { merge: true },
     );
