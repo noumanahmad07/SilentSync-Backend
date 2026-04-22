@@ -658,6 +658,13 @@ app.get("/api/check-unique-id/:uniqueId", async (req, res) => {
     // Check if unique ID exists in APK registrations
     const apkDoc = await db.collection("apkRegistrations").doc(uniqueId).get();
 
+    // Check if unique ID exists in per-user APK registrations (dashboard flow)
+    const userApkByUniqueIdSnapshot = await db
+      .collection("userApkRegistrations")
+      .where("uniqueId", "==", uniqueId)
+      .limit(1)
+      .get();
+
     // Also check if any device is already using this unique ID
     const deviceSnapshot = await db
       .collection("devices")
@@ -666,11 +673,15 @@ app.get("/api/check-unique-id/:uniqueId", async (req, res) => {
 
     const deviceWithSameId = deviceSnapshot.docs.find((doc) => doc.exists);
 
-    if (apkDoc.exists || deviceWithSameId) {
+    const userApkWithSameId = !userApkByUniqueIdSnapshot.empty;
+
+    if (apkDoc.exists || userApkWithSameId || deviceWithSameId) {
       console.log(`[Unique ID Check] ID ${uniqueId} already exists`);
       const conflictSource = apkDoc.exists
         ? "APK registration"
-        : "Device registration";
+        : userApkWithSameId
+          ? "User APK registration"
+          : "Device registration";
       console.log(`[Unique ID Check] Conflict source: ${conflictSource}`);
 
       res.json({
