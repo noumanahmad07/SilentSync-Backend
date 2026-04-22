@@ -177,6 +177,50 @@ app.get("/api/debug/firebase", (req, res) => {
   }
 });
 
+// Debug: check whether a device is connected/registered
+// Usage:
+// - GET /api/debug/device?deviceId=ABC
+// - GET /api/debug/device?uniqueId=YOUR_CODE
+app.get("/api/debug/device", async (req, res) => {
+  try {
+    const deviceId =
+      typeof req.query.deviceId === "string" ? req.query.deviceId : "";
+    const uniqueId =
+      typeof req.query.uniqueId === "string" ? req.query.uniqueId : "";
+
+    if (!deviceId && !uniqueId) {
+      return res
+        .status(400)
+        .json({ error: "Provide deviceId or uniqueId query param" });
+    }
+
+    if (deviceId) {
+      const docSnap = await db.collection("devices").doc(deviceId).get();
+      return res.json({
+        found: docSnap.exists,
+        deviceId,
+        data: docSnap.exists ? docSnap.data() : null,
+      });
+    }
+
+    const snap = await db
+      .collection("devices")
+      .where("uniqueId", "==", uniqueId)
+      .limit(10)
+      .get();
+
+    const devices = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    return res.json({
+      found: devices.length > 0,
+      uniqueId,
+      count: devices.length,
+      devices,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || "debug_failed" });
+  }
+});
+
 // --- API Routes ---
 
 // Register Device
