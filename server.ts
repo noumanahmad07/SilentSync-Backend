@@ -166,6 +166,7 @@ app.get("/health", (req, res) => {
 app.post("/api/register-device", async (req, res) => {
   const { deviceId, deviceName, ownerUid } = req.body;
   if (!deviceId) return res.status(400).json({ error: "deviceId is required" });
+  if (!ownerUid) return res.status(400).json({ error: "ownerUid is required" });
 
   try {
     const deviceRef = db.collection("devices").doc(deviceId);
@@ -178,8 +179,8 @@ app.post("/api/register-device", async (req, res) => {
         lastConnectionAt: admin.firestore.FieldValue.serverTimestamp(),
         status: "active",
         isOnline: true,
-        isPublic: true,
-        ownerUid: ownerUid || null,
+        isPublic: false, // Devices are private by default
+        ownerUid: ownerUid,
       },
       { merge: true },
     );
@@ -573,6 +574,74 @@ app.get("/api/audio/:deviceId", async (req, res) => {
   } catch (error) {
     console.error("Fetch audio error:", error);
     res.status(500).json({ error: "Failed to fetch audio files" });
+  }
+});
+
+// Get all devices
+app.get("/api/devices", async (req, res) => {
+  try {
+    const snapshot = await db.collection("devices").get();
+    const devices = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+    res.json(devices);
+  } catch (error) {
+    console.error("Error fetching devices:", error);
+    res.status(500).json({ error: "Failed to fetch devices" });
+  }
+});
+
+// Get devices by user ID
+app.get("/api/devices/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+
+    const snapshot = await db
+      .collection("devices")
+      .where("userId", "==", userId)
+      .get();
+
+    const devices = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+    res.json(devices);
+  } catch (error) {
+    console.error("Error fetching devices by userId:", error);
+    res.status(500).json({ error: "Failed to fetch devices" });
+  }
+});
+
+// Register APK with unique ID
+app.post("/api/register-apk", async (req, res) => {
+  const { uniqueId, apkUrl } = req.body;
+  if (!uniqueId || !apkUrl) {
+    return res.status(400).json({ error: "uniqueId and apkUrl are required" });
+  }
+
+  try {
+    // Store the APK registration
+    await db.collection("apkRegistrations").doc(uniqueId).set({
+      uniqueId,
+      apkUrl,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      status: "active",
+    });
+
+    console.log(`[APK Registration] Unique ID: ${uniqueId}, APK: ${apkUrl}`);
+    res.json({
+      success: true,
+      message: "APK registered successfully",
+      uniqueId,
+      apkUrl,
+    });
+  } catch (error) {
+    console.error("APK registration error:", error);
+    res.status(500).json({ error: "Failed to register APK" });
   }
 });
 
