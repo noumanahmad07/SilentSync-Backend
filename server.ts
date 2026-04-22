@@ -221,6 +221,35 @@ app.get("/api/debug/device", async (req, res) => {
   }
 });
 
+// Debug: list latest commands for a device
+// Usage: GET /api/debug/commands?deviceId=ABC&limit=20
+app.get("/api/debug/commands", async (req, res) => {
+  try {
+    const deviceId =
+      typeof req.query.deviceId === "string" ? req.query.deviceId : "";
+    const limitRaw =
+      typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : 20;
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 20;
+
+    if (!deviceId) {
+      return res.status(400).json({ error: "Provide deviceId query param" });
+    }
+
+    const snap = await db
+      .collection("devices")
+      .doc(deviceId)
+      .collection("commands")
+      .orderBy("createdAt", "desc")
+      .limit(limit)
+      .get();
+
+    const commands = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    res.json({ deviceId, count: commands.length, commands });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || "debug_failed" });
+  }
+});
+
 // --- API Routes ---
 
 // Register Device
