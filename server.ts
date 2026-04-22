@@ -1116,7 +1116,7 @@ app.get("/api/webrtc/answer/:deviceId", async (req, res) => {
 // Handle Photo Uploads
 app.post("/api/upload-photo/:deviceId", async (req, res) => {
   const { deviceId } = req.params;
-  const { fileName, base64, uri } = req.body;
+  const { fileName, base64, uri, originalFileName } = req.body;
 
   console.log(
     `[Photo] Upload request: deviceId=${deviceId}, fileName=${fileName}`,
@@ -1166,6 +1166,7 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
     await deviceRef.collection("photos").doc(photoId).set(
       {
         fileName: localFileName,
+        originalFileName: originalFileName || fileName,
         url: publicUrl,
         ...(uri ? { uri } : {}),
         syncedAt: admin.firestore.FieldValue.serverTimestamp(),
