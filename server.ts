@@ -645,6 +645,51 @@ app.post("/api/register-apk", async (req, res) => {
   }
 });
 
+// Check if unique ID is available
+app.get("/api/check-unique-id/:uniqueId", async (req, res) => {
+  const { uniqueId } = req.params;
+  if (!uniqueId) {
+    return res.status(400).json({ error: "uniqueId is required" });
+  }
+
+  try {
+    console.log(`[Unique ID Check] Checking availability for: ${uniqueId}`);
+
+    // Check if unique ID exists in APK registrations
+    const apkDoc = await db.collection("apkRegistrations").doc(uniqueId).get();
+
+    // Also check if any device is already using this unique ID
+    const deviceSnapshot = await db
+      .collection("devices")
+      .where("userId", "==", uniqueId)
+      .get();
+
+    const deviceWithSameId = deviceSnapshot.docs.find((doc) => doc.exists);
+
+    if (apkDoc.exists || deviceWithSameId) {
+      console.log(`[Unique ID Check] ID ${uniqueId} already exists`);
+      const conflictSource = apkDoc.exists
+        ? "APK registration"
+        : "Device registration";
+      console.log(`[Unique ID Check] Conflict source: ${conflictSource}`);
+
+      res.json({
+        available: false,
+        message: `Unique ID is already taken. It's already used in ${conflictSource}.`,
+        conflictSource,
+      });
+    } else {
+      console.log(
+        `[Unique ID Check] ID ${uniqueId} is available for APK registration`,
+      );
+      res.json({ available: true, message: "Unique ID is available" });
+    }
+  } catch (error) {
+    console.error("Check unique ID error:", error);
+    res.status(500).json({ error: "Failed to check unique ID" });
+  }
+});
+
 // Live Audio (HTTP fallback): store and serve latest short audio segment
 app.post("/api/live-audio/:deviceId", async (req, res) => {
   const { deviceId } = req.params;
