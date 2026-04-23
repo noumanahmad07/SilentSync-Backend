@@ -535,9 +535,11 @@ app.get("/api/commands/:deviceId", async (req, res) => {
       .collection("commands");
     const snapshot = await commandsRef.where("status", "==", "pending").get();
 
+    // Spread document data first so the real Firestore document id always wins
+    // (some clients may store an `id` field that would otherwise overwrite doc.id).
     const commands = snapshot.docs.map((doc) => ({
-      id: doc.id,
       ...doc.data(),
+      id: doc.id,
     }));
 
     // Mark as "sent" so device doesn't get them again
